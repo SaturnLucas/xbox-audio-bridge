@@ -20,7 +20,10 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
+import android.os.SystemClock
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -43,6 +46,10 @@ class StreamClient(
     private val connected = CountDownLatch(1)
     private val channels = CopyOnWriteArrayList<DataChannel>()
     private var statsThread: Thread? = null
+    private var inputThread: Thread? = null
+    private val openLabels = HashSet<String>()
+    private var inputStarted = false
+    private val seq = AtomicInteger(0)
 
     fun start(serverId: String) {
         log("Abrindo sessão com o console...")
@@ -62,6 +69,7 @@ class StreamClient(
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .build()
             )
+            .setUseLowLatency(true)
             .createAudioDeviceModule()
         adm = module
         val f = PeerConnectionFactory.builder()
@@ -73,6 +81,9 @@ class StreamClient(
 
         val cfg = PeerConnection.RTCConfiguration(emptyList<PeerConnection.IceServer>())
         cfg.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+        // menos buffer de áudio = menos atraso
+        cfg.audioJitterBufferMaxPackets = 30
+        cfg.audioJitterBufferFastAccelerate = true
         val p = f.createPeerConnection(cfg, observer) ?: throw Exception("Falha ao criar PeerConnection")
         pc = p
 
@@ -119,6 +130,7 @@ class StreamClient(
         if (stopped) return
         stopped = true
         statsThread?.interrupt()
+        inputThread?.interrupt()
         sessionId?.let { xhome.deleteSession(it) }
         try { channels.forEach { it.close() } } catch (_: Exception) {}
         try { pc?.close() } catch (_: Exception) {}
@@ -193,18 +205,77 @@ class StreamClient(
     }
 
     private fun onChannelOpen(label: String, dc: DataChannel) {
-        when (label) {
-            "control" -> sendText(
-                dc,
-                JSONObject().put("message", "authorizationRequest")
-                    .put("accessKey", "4BDB3609-C1F1-4195-9B37-FEFF45DA8B8E").toString()
-            )
-            "message" -> sendText(
+        if (label == "message") {
+            sendText(
                 dc,
                 JSONObject().put("type", "Handshake").put("version", "messageV1")
                     .put("id", UUID.randomUUID().toString()).put("cv", "").toString()
             )
         }
+        synchronized(openLabels) {
+            openLabels.add(label)
+            if (inputStarted || !openLabels.containsAll(listOf("control", "input", "message"))) return
+            inputStarted = true
+        }
+        startInput()
+    }
+
+    private fun channel(label: String): DataChannel? = channels.firstOrNull { it.label() == label }
+
+    private fun sendBin(dc: DataChannel, bb: ByteBuffer) {
+        bb.rewind()
+        dc.send(DataChannel.Buffer(bb, true))
+    }
+
+    /** Cabeçalho do pacote de input: tipo (2B) + sequência (4B) + tempo (8B), little-endian. */
+    private fun inputPacket(size: Int, reportType: Int, sequence: Int): ByteBuffer {
+        val bb = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
+        bb.putShort(0, reportType.toShort())
+        bb.putInt(2, sequence)
+        bb.putDouble(6, SystemClock.elapsedRealtime().toDouble())
+        return bb
+    }
+
+    /** Handshake do canal de input + envio contínuo de quadros de controle neutros (mantém a sessão viva). */
+    private fun startInput() {
+        val control = channel("control")
+        val input = channel("input")
+        if (control == null || input == null) return
+        sendText(
+            control,
+            JSONObject().put("message", "authorizationRequest")
+                .put("accessKey", "4BDB3609-C1F1-4195-9B37-FEFF45DA8B8E").toString()
+        )
+        sendText(
+            control,
+            JSONObject().put("message", "gamepadChanged").put("gamepadIndex", 0).put("wasAdded", true).toString()
+        )
+        // ClientMetadata (tipo 8): cabeçalho + maxTouchpoints
+        val meta = inputPacket(15, 8, 0)
+        meta.put(14, 1)
+        sendBin(input, meta)
+        log("Handshake de input enviado")
+
+        inputThread = Thread {
+            try {
+                while (!stopped) {
+                    sendNeutralGamepad(input)
+                    Thread.sleep(16)
+                }
+            } catch (_: InterruptedException) {
+            }
+        }.also { it.isDaemon = true; it.start() }
+    }
+
+    private fun sendNeutralGamepad(input: DataChannel) {
+        // tipo 2 (gamepad): cabeçalho(14) + contagem(1) + 1 quadro(23)
+        val bb = inputPacket(38, 2, seq.incrementAndGet())
+        bb.put(14, 1)      // 1 quadro
+        bb.put(15, 0)      // gamepad index 0
+        // botões, eixos e gatilhos ficam em zero (bytes 16..29)
+        bb.putInt(30, 1)   // physicality (little-endian)
+        bb.put(37, 1)      // virtual physicality (big-endian) = 1
+        if (input.state() == DataChannel.State.OPEN) sendBin(input, bb)
     }
 
     // ---------- observer ----------
@@ -242,8 +313,13 @@ class StreamClient(
                     pc?.getStats(RTCStatsCollectorCallback { report ->
                         for (s in report.statsMap.values) {
                             if (s.type == "inbound-rtp") {
-                                val kind = s.members["kind"] ?: s.members["mediaType"]
-                                log("rtp $kind: pacotes=${s.members["packetsReceived"]} bytes=${s.members["bytesReceived"]}")
+                                val kind = (s.members["kind"] ?: s.members["mediaType"]).toString()
+                                if (kind == "audio") {
+                                    val jd = s.members["jitterBufferDelay"]?.toString()?.toDoubleOrNull()
+                                    val je = s.members["jitterBufferEmittedCount"]?.toString()?.toDoubleOrNull()
+                                    val avg = if (jd != null && je != null && je > 0) (jd / je * 1000).toInt() else -1
+                                    log("áudio: pacotes=${s.members["packetsReceived"]} buffer=${avg}ms")
+                                }
                             }
                         }
                     })
