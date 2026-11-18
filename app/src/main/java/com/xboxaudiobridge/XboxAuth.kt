@@ -230,15 +230,19 @@ class XboxAuth(ctx: Context, private val log: (String) -> Unit) {
     }
 
     private fun authorizeSisu(access: String): JSONObject {
+        val dev = deviceToken()
         val body = JSONObject()
             .put("AccessToken", "t=$access")
             .put("AppId", APP_ID)
-            .put("DeviceToken", deviceToken())
+            .put("DeviceToken", dev)
             .put("Sandbox", "RETAIL")
             .put("SiteName", "user.auth.xboxlive.com")
             .put("UseModernGamertag", true)
             .put("ProofKey", proofKey())
         val j = JSONObject(postSigned("https://sisu.xboxlive.com/authorize", body.toString()).body)
+        // a resposta pode não repetir o DeviceToken: usa o que foi enviado
+        if (!j.has("DeviceToken") || j.optString("DeviceToken").isEmpty()) j.put("DeviceToken", dev)
+        log("Campos da resposta SISU: " + j.keys().asSequence().toList())
         prefs.edit().putString("sisu", j.toString()).apply()
         return j
     }
