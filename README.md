@@ -1,10 +1,12 @@
 # Xbox Audio Bridge
 
-App Android para receber só o áudio do Xbox Series S pela rede Wi-Fi, com o menor atraso possível.
+App Android que recebe só o áudio do Xbox pela rede (streaming local xHome) e toca no celular.
 
-## Estado
-- Pronto: interface, saída de áudio de baixa latência, tom de teste, build automático do APK.
-- Falta: `NanoAudioSource.kt` (login Xbox, sessão Nano, áudio Opus). Referência: projeto XStreaming.
+## Fluxo
+1. Entrar com conta Xbox (login Microsoft no WebView, fluxo SISU).
+2. Conectar: lista consoles, abre sessão, negocia WebRTC e toca o áudio recebido. O vídeo é ignorado.
+
+O log na tela mostra cada etapa. "Copiar log" ajuda a diagnosticar problemas.
 
 ## APK
-A cada push na branch `main`, o GitHub Actions compila e publica o APK em Releases > latest.
+A cada push na `main`, o GitHub Actions compila e publica em Releases > latest.
