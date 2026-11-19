@@ -36,6 +36,8 @@ class StreamClient(
     private val log: (String) -> Unit
 ) {
     @Volatile private var stopped = false
+    var onState: ((String) -> Unit)? = null
+    var onLatency: ((Int) -> Unit)? = null
     private var factory: PeerConnectionFactory? = null
     private var pc: PeerConnection? = null
     private var egl: EglBase? = null
@@ -302,6 +304,12 @@ class StreamClient(
         }
         override fun onConnectionChange(s: PeerConnection.PeerConnectionState?) {
             log("Conexão: $s")
+            if (!stopped) when (s) {
+                PeerConnection.PeerConnectionState.CONNECTED -> onState?.invoke("connected")
+                PeerConnection.PeerConnectionState.DISCONNECTED -> onState?.invoke("unstable")
+                PeerConnection.PeerConnectionState.FAILED -> onState?.invoke("ended")
+                else -> {}
+            }
         }
     }
 
@@ -319,6 +327,7 @@ class StreamClient(
                                     val je = s.members["jitterBufferEmittedCount"]?.toString()?.toDoubleOrNull()
                                     val avg = if (jd != null && je != null && je > 0) (jd / je * 1000).toInt() else -1
                                     log("áudio: pacotes=${s.members["packetsReceived"]} buffer=${avg}ms")
+                                    if (avg >= 0) onLatency?.invoke(avg)
                                 }
                             }
                         }

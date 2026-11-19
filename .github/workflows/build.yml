@@ -20,14 +20,24 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
+      - name: Prepare signing key
+        env:
+          KS_B64: ${{ secrets.KS_B64 }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/xab.jks"
+          echo "KS_PATH=$RUNNER_TEMP/xab.jks" >> "$GITHUB_ENV"
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+        env:
+          KS_PASS: ${{ secrets.KS_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+        run: gradle assembleDebug --no-daemon -PbuildNumber=${{ github.run_number }}
       - name: Publish APK in release "latest"
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
           gh release create latest app/build/outputs/apk/debug/app-debug.apk \
-            --title "Xbox Audio Bridge (build mais recente)" \
-            --notes "APK de debug gerado automaticamente." \
+            --title "Xbox Audio Bridge (build ${{ github.run_number }})" \
+            --notes "build=${{ github.run_number }}" \
             --target "${{ github.sha }}" --prerelease

@@ -44,8 +44,10 @@ class XboxAuth(ctx: Context, private val log: (String) -> Unit) {
 
     fun hasLogin(): Boolean = prefs.getString("refresh", null) != null
 
+    fun gamertag(): String? = prefs.getString("gt", null)
+
     fun logout() {
-        prefs.edit().remove("refresh").remove("sisu").apply()
+        prefs.edit().remove("refresh").remove("sisu").remove("gt").apply()
     }
 
     // ---------- chaves ----------
@@ -242,8 +244,11 @@ class XboxAuth(ctx: Context, private val log: (String) -> Unit) {
         val j = JSONObject(postSigned("https://sisu.xboxlive.com/authorize", body.toString()).body)
         // a resposta pode não repetir o DeviceToken: usa o que foi enviado
         if (!j.has("DeviceToken") || j.optString("DeviceToken").isEmpty()) j.put("DeviceToken", dev)
-        log("Campos da resposta SISU: " + j.keys().asSequence().toList())
-        prefs.edit().putString("sisu", j.toString()).apply()
+        val tag = j.optJSONObject("AuthorizationToken")?.optJSONObject("DisplayClaims")
+            ?.optJSONArray("xui")?.optJSONObject(0)?.optString("gtg", "") ?: ""
+        val e = prefs.edit().putString("sisu", j.toString())
+        if (tag.isNotEmpty()) e.putString("gt", tag)
+        e.apply()
         return j
     }
 
@@ -294,9 +299,6 @@ class XboxAuth(ctx: Context, private val log: (String) -> Unit) {
         val sisu = authorizeSisu(access)
         val xsts = xsts(sisu, "http://gssv.xboxlive.com/")
         val gs = xhomeLogin(xsts)
-        val tag = sisu.optJSONObject("AuthorizationToken")?.optJSONObject("DisplayClaims")
-            ?.optJSONArray("xui")?.optJSONObject(0)?.optString("gtg", "") ?: ""
-        if (tag.isNotEmpty()) log("Conta Xbox: $tag")
         return gs
     }
 }
